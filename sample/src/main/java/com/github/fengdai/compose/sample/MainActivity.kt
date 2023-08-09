@@ -29,6 +29,8 @@ import androidx.compose.ui.unit.Constraints.Companion.Infinity
 import androidx.core.view.ViewCompat
 import com.google.accompanist.web.WebView
 import com.google.accompanist.web.rememberWebViewState
+import com.kevinzou.sample.nestedscroll.NestedScrollSample
+import com.kevinzou.sample.nestedscroll.NestedScrollSample2
 import com.telefonica.nestedscrollwebview.NestedScrollWebView
 import java.lang.Integer.max
 import kotlin.math.roundToInt
@@ -37,16 +39,17 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            Commodity(
-                topContent = {
-                    Box(
-                        modifier = Modifier
-                            .height(1000.dp)
-                            .fillMaxWidth()
-                            .background(Brush.verticalGradient(listOf(Color.Black, Color.White)))
-                    )
-                }
-            )
+            NestedScrollSample2()
+//            Commodity(
+//                topContent = {
+//                    Box(
+//                        modifier = Modifier
+//                            .height(1000.dp)
+//                            .fillMaxWidth()
+//                            .background(Brush.verticalGradient(listOf(Color.Black, Color.White)))
+//                    )
+//                }
+//            )
         }
     }
 }
@@ -71,6 +74,11 @@ class CommodityState {
     private var _maxScrollYState = mutableStateOf(Int.MAX_VALUE)
     private var accumulator: Float = 0f
 
+    /**
+     * 在InnerConnection中，它会拦截WebView的划动事件并通过dispatchRawDelta最终调用到这里到onDelta方法
+     * 在手指上划时，如果顶部内容已经完全不可见，则不管划动距离是多少，absolute都会大于maxScrollY，从而导致consumed为0
+     * 这就意味着这种情况下我们并不去拦截WebView的滚动，让其自行处理
+     */
     internal val scrollableState = ScrollableState {
         val absolute = (scrollY + it + accumulator)
         val newValue = absolute.coerceIn(0f, maxScrollY.toFloat())
@@ -87,6 +95,11 @@ class CommodityState {
     internal lateinit var flingBehavior: FlingBehavior
 
     internal val nestedScrollConnection = object : NestedScrollConnection {
+        /**
+         * 主要用于在顶部内容完全不显示时，在WebView下拉，漏出顶部内容，不松手接着上划
+         * 这个时候顶部内容并不会划动回去，而是WebView自己消耗了，这样显然时不行的
+         * 所以我们在这里拦截WebView滚动，在向上滚动时去判断顶部内容是否可以滚动，若可以则先滚动顶部内容
+         */
         override fun onPreScroll(
             available: Offset,
             source: NestedScrollSource
@@ -96,6 +109,9 @@ class CommodityState {
             } else super.onPreScroll(available, source)
         }
 
+        /**
+         * WebView消耗完后，如果还有内容，则交给scrollable滚动，即整体上划
+         */
         override fun onPostScroll(
             consumed: Offset,
             available: Offset,
@@ -153,6 +169,17 @@ fun Commodity(
     fun isScrollableEnabled() = state.canScrollForward || isDragged
     val scope = rememberCoroutineScope()
     val outerNestedScrollConnection = remember {
+        /**
+         * 这个方法感觉没啥大用，主要应对的情况是顶部内容仍然可见，且用户向下划动想要显示更多顶部内容
+         * 这时会去看WebView的内容是否已经内部滚动了一段距离，若有则先将WebView归位
+         * 剩下的滚动内容会交给它的child，也就是scrollable处理
+         * 但是在实际操作中，顶部内容可见的情况下，WebView肯定是没有滚动的，所以它的scrollY一直为0
+         * 这就导致即使走到了划动逻辑，也不会有任何滚动，所以这个方法实际上没啥用
+         * 测试后发现一种应用场景，也正是这个connection存在的意义：
+         * 用户在顶部内容可见时，一次性划动到顶部内容消失，这时如果没有下面onPostScroll的处理，会卡在WebView顶部
+         * 处理后能将剩余滚动传递到WebView内部，但是这时如果再往回划动，如果这个方法不做处理，会直接划动出现顶部内容
+         * 但是之前部分划动的WebView并不会复原，所以这里就需要先拦截向下滚动事件，将WebView归位，然后再将剩余滚动传递给子容器
+         */
         object : NestedScrollConnection {
             override fun onPreScroll(
                 available: Offset,
@@ -171,6 +198,13 @@ fun Commodity(
                 return super.onPreScroll(available, source)
             }
 
+            /**
+             * 这个方法的作用是在它的child，也就是scrollable滚动后，再将剩下的滚动量交给WebView处理
+             * 它的触发时机是顶部内容仍然可见，且用户向上划动想要显示更多WebView内容
+             * 因为是PostScroll,所以会在child滚动后才触发，等于是当整体列表划动后还有剩余距离时才会去向下划动WebView
+             * 测试后发现其使用场景为：在顶部内容仍然存在，然后一次划动距离超过顶部内容时，做到无缝衔接。
+             * 如果没有它，表现会是先将顶部内容滚完，然后就卡住，必须要再次划动才能触发WebView内部滚动
+             */
             override fun onPostScroll(
                 consumed: Offset,
                 available: Offset,
